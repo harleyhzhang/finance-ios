@@ -1,0 +1,22 @@
+{
+  "name": "finance-ios",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test Tests/*.test.ts",
+    "convex:deploy": "convex deploy --typecheck enable",
+    "verify": "bash Tools/verify.sh"
+  },
+  "dependencies": {
+    "convex": "1.45.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "prettier": "^3.6.2",
+    "typescript": "5.9.3"
+  }
+}

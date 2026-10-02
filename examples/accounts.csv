@@ -1,0 +1,5 @@
+id,name,institution,category,currency,amount,asOf,note
+chequing,Chequing,Example Bank,Cash,CAD,12845.00,2026-09-30,
+tfsa,TFSA,Example Broker,Investments,CAD,48123.00,2026-09-30,
+brokerage,Brokerage,Example Broker,Investments,USD,30679.00,2026-09-30,
+card,Credit card,Example Bank,Credit cards,CAD,-1842.00,2026-09-30,Statement balance

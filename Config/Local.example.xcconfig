@@ -1,0 +1,4 @@
+// Copy to Config/Local.xcconfig. Never commit the copy.
+FINANCE_BUNDLE_ID = com.yourname.finance
+FINANCE_OWNER_NAME = Sam
+DEVELOPMENT_TEAM = ABCDE12345

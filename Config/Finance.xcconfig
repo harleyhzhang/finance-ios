@@ -1,0 +1,7 @@
+// Shared build settings. Put your own values in Config/Local.xcconfig (gitignored);
+// copy Config/Local.example.xcconfig to start.
+FINANCE_BUNDLE_ID = com.example.finance
+FINANCE_OWNER_NAME =
+DEVELOPMENT_TEAM =
+
+#include? "Local.xcconfig"
