@@ -40,3 +40,13 @@ The chart draws straight lines between recorded points and never interpolates ne
 ## RSUs
 
 An `RSUs` account needs a `valuation` object containing the unit price, its source and date, and the vested and settled unit counts. The amount must equal the vested unsettled units times the price. `node Tools/finance.ts estimate-rsus input.json out.json` builds and checks that object; see `Tools/equity.ts` for the fields.
+
+## Chunked history
+
+`prepare` seals history as one encrypted chunk per month and publishes a small
+head (accounts, rates, notes and the list of month digests). Sealing is
+deterministic per key and month, so an unchanged month always has the same
+digest: `publish` uploads only months the backend lacks, and the phone fetches
+only months it has not cached (`GET /v1/history/<digest>`, immutable). Neither
+side re-encrypts or re-downloads the whole history when one day is added.
+Heads without `historyChunks` still carry history inline and remain valid.

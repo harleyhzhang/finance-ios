@@ -10,4 +10,9 @@ export default defineSchema({
   })
     .index("by_revision", ["revision"])
     .index("by_digest", ["digest"]),
+  // Immutable sealed months of history, content-addressed by ciphertext digest.
+  historyChunks: defineTable({
+    digest: v.string(),
+    envelope: v.string(),
+  }).index("by_digest", ["digest"]),
 });

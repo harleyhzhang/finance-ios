@@ -194,9 +194,61 @@ final class SnapshotTests: XCTestCase {
 
 private struct FailingTransport: SnapshotFetching {
     func fetch(_ connection: Connection, digest: String?) async throws -> SnapshotResponse? { throw SnapshotError.unavailable }
+    func fetchChunk(_ connection: Connection, digest: String) async throws -> HistoryChunkResponse { throw SnapshotError.unavailable }
 }
 
 private struct SuccessfulTransport: SnapshotFetching {
     let response: SnapshotResponse
+    var chunks: [String: HistoryChunkResponse] = [:]
+    let fetched = ChunkCounter()
     func fetch(_ connection: Connection, digest: String?) async throws -> SnapshotResponse? { response }
+    func fetchChunk(_ connection: Connection, digest: String) async throws -> HistoryChunkResponse {
+        fetched.count += 1
+        guard let chunk = chunks[digest] else { throw SnapshotError.unavailable }
+        return chunk
+    }
+}
+
+private final class ChunkCounter: @unchecked Sendable { var count = 0 }
+
+extension SnapshotTests {
+    private func seal<T: Encodable>(_ value: T, key: SymmetricKey) throws -> (String, EncryptedEnvelope) {
+        let combined = try XCTUnwrap(AES.GCM.seal(JSONEncoder().encode(value), using: key).combined)
+        return (SHA256.hash(data: combined).map { String(format: "%02x", $0) }.joined(),
+                EncryptedEnvelope(version: 1, algorithm: "AES-256-GCM", combined: combined.base64EncodedString()))
+    }
+
+    @MainActor func testChunkedHeadFetchesOnlyUnseenMonths() async throws {
+        struct Month: Encodable { let month: String; let history: [HistoryValue] }
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let key = SymmetricKey(size: .bits256)
+        let connection = Connection(version: 1, endpoint: "https://test-example.convex.site/v1/snapshot", readToken: String(repeating: "a", count: 48), encryptionKey: key.withUnsafeBytes { Data($0).base64EncodedString() })
+        let full = try fixture()
+        let point = try XCTUnwrap(full.history.first)
+        let (chunkDigest, chunkEnvelope) = try seal(Month(month: "2026-01", history: [point]), key: key)
+        let head = full.with(history: []).withChunks([HistoryChunkRef(month: "2026-01", digest: chunkDigest)])
+        let (headDigest, headEnvelope) = try seal(head, key: key)
+        let response = SnapshotResponse(revision: 1, capturedAt: full.capturedAt, digest: headDigest, envelope: headEnvelope)
+        let transport = SuccessfulTransport(response: response, chunks: [chunkDigest: HistoryChunkResponse(digest: chunkDigest, envelope: chunkEnvelope)])
+
+        let store = SnapshotStore(directory: directory, transport: transport, loadConnection: { connection })
+        await store.refresh()
+        XCTAssertEqual(store.snapshot, full)
+        XCTAssertEqual(transport.fetched.count, 1)
+
+        // A later head that references the same month reuses the cached chunk.
+        let again = SnapshotStore(directory: directory, transport: SuccessfulTransport(response: SnapshotResponse(revision: 2, capturedAt: full.capturedAt, digest: headDigest + "", envelope: headEnvelope), chunks: [:]), loadConnection: { connection })
+        await again.refresh()
+        XCTAssertEqual(again.snapshot, full)
+    }
+}
+
+extension Snapshot {
+    fileprivate func withChunks(_ refs: [HistoryChunkRef]) -> Snapshot {
+        var copy = self
+        copy.historyChunks = refs
+        return copy
+    }
 }

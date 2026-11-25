@@ -9,6 +9,7 @@ struct CachedSnapshot: Codable { let revision: Int; let digest: String?; let sna
     private var revision = 0
     private var digest: String?
     private let cacheURL: URL
+    private let chunkDirectory: URL
     private let reportURL: URL
     private let transport: any SnapshotFetching
     private let loadConnection: () throws -> Connection?
@@ -16,6 +17,7 @@ struct CachedSnapshot: Codable { let revision: Int; let digest: String?; let sna
         self.transport = transport
         self.loadConnection = loadConnection
         cacheURL = directory.appending(path: "cache-v2.json")
+        chunkDirectory = directory.appending(path: "history-chunks", directoryHint: .isDirectory)
         reportURL = directory.appending(path: "last-refresh.json")
         #if DEBUG
         if DemoSnapshot.isEnabled { snapshot = DemoSnapshot.make(); return }
@@ -56,7 +58,7 @@ struct CachedSnapshot: Codable { let revision: Int; let digest: String?; let sna
                 recordRefresh(outcome: "unchanged")
                 return
             }
-            let next = try response.decrypt(using: connection)
+            let next = try await assemble(try response.decrypt(using: connection), connection: connection)
             guard response.revision >= revision, snapshot == nil || next.capturedAt >= (snapshot?.capturedAt ?? "") else { throw SnapshotError.rollback }
             if response.revision == revision, let digest, response.digest != digest { throw SnapshotError.invalidResponse }
             let cached = CachedSnapshot(revision: response.revision, digest: response.digest, snapshot: next)
@@ -68,6 +70,31 @@ struct CachedSnapshot: Codable { let revision: Int; let digest: String?; let sna
             message = RefreshFailure.message(for: error)
             recordRefresh(outcome: "failed", error: error)
         }
+    }
+    /// Expands a chunked head: cached months are reused, only unseen months are fetched.
+    private func assemble(_ head: Snapshot, connection: Connection) async throws -> Snapshot {
+        guard let refs = head.historyChunks else { return head }
+        try FileManager.default.createDirectory(at: chunkDirectory, withIntermediateDirectories: true)
+        var history: [HistoryValue] = []
+        for ref in refs {
+            let file = chunkDirectory.appending(path: ref.digest + ".json")
+            let chunk: HistoryChunkResponse
+            if let data = try? Data(contentsOf: file), let cached = try? JSONDecoder().decode(HistoryChunkResponse.self, from: data), cached.digest == ref.digest {
+                chunk = cached
+            } else {
+                chunk = try await transport.fetchChunk(connection, digest: ref.digest)
+                try JSONEncoder().encode(chunk).write(to: file, options: [.atomic, .completeFileProtection])
+            }
+            history += try chunk.open(month: ref.month, using: connection)
+        }
+        let full = head.with(history: history)
+        try full.validate()
+        // Drop months no longer referenced so the cache tracks the live head.
+        let keep = Set(refs.map { $0.digest + ".json" })
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: chunkDirectory.path)) ?? [] where !keep.contains(name) {
+            try? FileManager.default.removeItem(at: chunkDirectory.appending(path: name))
+        }
+        return full
     }
     private func recordRefresh(outcome: String, error: Error? = nil) {
         let native = error.map { $0 as NSError }
