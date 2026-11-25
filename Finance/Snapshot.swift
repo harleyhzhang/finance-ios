@@ -18,6 +18,7 @@ struct HistoryValue: Codable, Equatable {
     let currency: String
     let source: String
 }
+struct HistoryChunkRef: Codable, Equatable { let month: String; let digest: String }
 struct Snapshot: Codable, Equatable {
     let schemaVersion: Int
     let capturedAt: String
@@ -27,6 +28,12 @@ struct Snapshot: Codable, Equatable {
     let accounts: [Account]
     let history: [HistoryValue]
     let notes: [String]
+    /// Chunked heads carry history as sealed monthly chunks instead of inline.
+    var historyChunks: [HistoryChunkRef]? = nil
+    func with(history: [HistoryValue]) -> Snapshot {
+        Snapshot(schemaVersion: schemaVersion, capturedAt: capturedAt, asOf: asOf, cadPerUSD: cadPerUSD, fxAsOf: fxAsOf,
+                 accounts: accounts, history: history, notes: notes, historyChunks: nil)
+    }
     var rate: Decimal { Decimal(string: cadPerUSD, locale: Locale(identifier: "en_US_POSIX")) ?? 1 }
     var totalUSD: Double { accounts.reduce(0) { $0 + usd($1) } }
     func usd(_ account: Account) -> Double { converted(minor: account.amountMinor, from: account.currency, to: "USD") }

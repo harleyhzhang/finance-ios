@@ -3,6 +3,7 @@ import {
   createCipheriv,
   createDecipheriv,
   createHash,
+  createHmac,
   randomBytes,
 } from "node:crypto";
 export type Account = {
@@ -22,8 +23,11 @@ export type History = {
   currency: string;
   source: string;
 };
+export type HistoryChunkRef = { month: string; digest: string };
 export type Snapshot = {
   schemaVersion: 2;
+  /** Present on chunked heads: history lives in sealed monthly chunks. */
+  historyChunks?: HistoryChunkRef[];
   capturedAt: string;
   asOf: string;
   cadPerUSD: string;
@@ -98,6 +102,18 @@ export function validateSnapshot(value: unknown): asserts value is Snapshot {
   }
   if (!Array.isArray(s.history) || s.history.length > 10000)
     throw Error("invalid_history");
+  if (
+    s.historyChunks !== undefined &&
+    (!Array.isArray(s.historyChunks) ||
+      s.history.length !== 0 ||
+      s.historyChunks.some(
+        (c, i, all) =>
+          !/^\d{4}-\d{2}$/.test(c.month) ||
+          !/^[a-f0-9]{64}$/.test(c.digest) ||
+          (i > 0 && all[i - 1].month >= c.month),
+      ))
+  )
+    throw Error("invalid_history_chunks");
   let last = "";
   for (const h of s.history) {
     if (
@@ -154,4 +170,80 @@ export function decrypt(envelope: string, key: Buffer): Snapshot {
   );
   validateSnapshot(s);
   return s;
+}
+
+/** Sealed month of history. The nonce is derived from the key and plaintext,
+ * so an unchanged month always seals to the same bytes and digest: a publish
+ * uploads only months that changed, never the whole growing history again. */
+export type SealedChunk = { month: string; digest: string; envelope: string };
+export function sealChunk(
+  month: string,
+  points: History[],
+  key: Buffer,
+): SealedChunk {
+  if (key.length !== 32) throw Error("invalid_key");
+  if (!/^\d{4}-\d{2}$/.test(month) || points.some((p) => !p.date.startsWith(month + "-")))
+    throw Error("invalid_chunk_month");
+  const clear = JSON.stringify({ month, history: points });
+  const nonce = createHmac("sha256", key)
+    .update("finance-history-chunk-v1\0" + clear)
+    .digest()
+    .subarray(0, 12);
+  const cipher = createCipheriv("aes-256-gcm", key, nonce);
+  const combined = Buffer.concat([
+    nonce,
+    cipher.update(clear, "utf8"),
+    cipher.final(),
+    cipher.getAuthTag(),
+  ]);
+  return {
+    month,
+    digest: createHash("sha256").update(combined).digest("hex"),
+    envelope: JSON.stringify({
+      version: 1,
+      algorithm: "AES-256-GCM",
+      combined: combined.toString("base64"),
+    }),
+  };
+}
+export function openChunk(chunk: SealedChunk, key: Buffer): History[] {
+  const e = JSON.parse(chunk.envelope);
+  const b = Buffer.from(e.combined, "base64");
+  if (createHash("sha256").update(b).digest("hex") !== chunk.digest)
+    throw Error("chunk_digest_mismatch");
+  const decipher = createDecipheriv("aes-256-gcm", key, b.subarray(0, 12));
+  decipher.setAuthTag(b.subarray(-16));
+  const clear = JSON.parse(
+    Buffer.concat([decipher.update(b.subarray(12, -16)), decipher.final()]).toString("utf8"),
+  );
+  if (clear.month !== chunk.month) throw Error("chunk_month_mismatch");
+  return clear.history as History[];
+}
+/** Head (accounts, rates, chunk references) plus one sealed chunk per month. */
+export function encryptChunked(snapshot: Snapshot, key: Buffer) {
+  validateSnapshot(snapshot);
+  const months = new Map<string, History[]>();
+  for (const point of snapshot.history) {
+    const month = point.date.slice(0, 7);
+    months.set(month, [...(months.get(month) ?? []), point]);
+  }
+  const chunks = [...months].map(([month, points]) => sealChunk(month, points, key));
+  const head: Snapshot = {
+    ...snapshot,
+    history: [],
+    historyChunks: chunks.map(({ month, digest }) => ({ month, digest })),
+  };
+  return { ...encrypt(head, key), chunks };
+}
+export function assembleChunked(head: Snapshot, chunks: SealedChunk[], key: Buffer): Snapshot {
+  const byDigest = new Map(chunks.map((c) => [c.digest, c]));
+  const history = (head.historyChunks ?? []).flatMap((ref) => {
+    const chunk = byDigest.get(ref.digest);
+    if (!chunk || chunk.month !== ref.month) throw Error("missing_history_chunk");
+    return openChunk(chunk, key);
+  });
+  const { historyChunks: _, ...rest } = head;
+  const full = { ...rest, history };
+  validateSnapshot(full);
+  return full;
 }

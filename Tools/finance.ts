@@ -12,7 +12,14 @@ import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { randomBytes, createHash } from "node:crypto";
-import { validateSnapshot, encrypt, decrypt } from "./snapshot.ts";
+import {
+  validateSnapshot,
+  encrypt,
+  decrypt,
+  encryptChunked,
+  assembleChunked,
+  type SealedChunk,
+} from "./snapshot.ts";
 import { snapshotFromCSV } from "./csv.ts";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /** The app's bundle identifier from Config/Local.xcconfig, falling back to the shared default. */
@@ -116,11 +123,11 @@ async function main() {
   } else if (command === "prepare") {
     const s = load(args[0]),
       c = credentials(),
-      e = encrypt(s, Buffer.from(c.encryptionKey, "base64"));
+      key = Buffer.from(c.encryptionKey, "base64"),
+      e = encryptChunked(s, key);
     if (
-      JSON.stringify(
-        decrypt(e.envelope, Buffer.from(c.encryptionKey, "base64")),
-      ) !== JSON.stringify(s)
+      JSON.stringify(assembleChunked(decrypt(e.envelope, key), e.chunks, key)) !==
+      JSON.stringify(s)
     )
       throw Error("Encryption verification failed");
     privateWrite(args[1], JSON.stringify(e));
@@ -172,11 +179,37 @@ async function main() {
     const expected = Number(args[1]);
     if (!Number.isSafeInteger(expected) || expected < 0)
       throw Error("Supply expected revision from status");
+    // History months are content-addressed: upload only months the server lacks.
+    const chunks = (prepared.chunks ?? []) as SealedChunk[];
+    const missing = chunks.length
+      ? (JSON.parse(
+          run("npx", [
+            "convex",
+            "run",
+            "history:missing",
+            JSON.stringify({ digests: chunks.map((c) => c.digest) }),
+            "--prod",
+          ]),
+        ) as string[])
+      : [];
+    const upload = chunks.filter((c) => missing.includes(c.digest));
+    if (upload.length)
+      console.log(
+        run("npx", [
+          "convex",
+          "run",
+          "history:publishChunks",
+          JSON.stringify({ chunks: upload.map(({ digest, envelope }) => ({ digest, envelope })) }),
+          "--prod",
+        ]),
+      );
+    console.log(`History months: ${upload.length} uploaded, ${chunks.length - upload.length} unchanged.`);
+    const { chunks: _chunks, ...head } = prepared;
     const output = run("npx", [
       "convex",
       "run",
       "snapshots:publish",
-      JSON.stringify({ ...prepared, expectedRevision: expected }),
+      JSON.stringify({ ...head, expectedRevision: expected }),
       "--prod",
     ]);
     console.log(output);
@@ -211,10 +244,19 @@ async function main() {
       combined = Buffer.from(body.envelope.combined, "base64");
     if (createHash("sha256").update(combined).digest("hex") !== body.digest)
       throw Error("Digest mismatch");
-    const s = decrypt(
-      JSON.stringify(body.envelope),
-      Buffer.from(c.encryptionKey, "base64"),
-    );
+    const key = Buffer.from(c.encryptionKey, "base64");
+    const head = decrypt(JSON.stringify(body.envelope), key);
+    const chunks: SealedChunk[] = [];
+    for (const ref of head.historyChunks ?? []) {
+      const chunkResponse = await fetch(endpoint.replace(/\/v1\/snapshot$/, "/v1/history/" + ref.digest), {
+        headers: { authorization: "Bearer " + c.readToken },
+        redirect: "error",
+      });
+      if (!chunkResponse.ok) throw Error("History chunk read failed: " + chunkResponse.status);
+      const chunkBody = (await chunkResponse.json()) as any;
+      chunks.push({ month: ref.month, digest: ref.digest, envelope: JSON.stringify(chunkBody.envelope) });
+    }
+    const s = head.historyChunks ? assembleChunked(head, chunks, key) : head;
     if (s.capturedAt !== body.capturedAt) throw Error("Capture mismatch");
     const unchanged = await fetch(endpoint, {
       headers: {

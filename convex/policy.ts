@@ -42,3 +42,18 @@ export function nextRevision(
     throw new Error("stale_snapshot");
   return expected + 1;
 }
+export const MAX_CHUNK_BYTES = 64_000;
+export function validateChunk(envelope: string, digest: string): void {
+  if (new TextEncoder().encode(envelope).length > MAX_CHUNK_BYTES)
+    throw new Error("chunk_too_large");
+  if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error("invalid_digest");
+  const parsed = JSON.parse(envelope);
+  if (
+    parsed.version !== 1 ||
+    parsed.algorithm !== "AES-256-GCM" ||
+    typeof parsed.combined !== "string" ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(parsed.combined) ||
+    parsed.combined.length < 40
+  )
+    throw new Error("invalid_envelope");
+}
